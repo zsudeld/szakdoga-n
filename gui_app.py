@@ -168,13 +168,15 @@ class SentimentGui:
             poz   = stats["Pozitív (Hibrid)"]
             neg   = stats["Negatív (Hibrid)"]
             sem   = stats["Semleges (Hibrid)"]
+            hib   = stats.get("Hiba (feldolgozás)", 0)
             atl   = stats["Átlagos HuSpaCy pont"]
-            total = poz + neg + sem
+            total = poz + neg + sem + hib
             uzenet = (
                 f"Elemzes kesz!\n\n"
                 f"Pozitiv:  {poz} db  ({poz/total*100:.1f}%)\n"
                 f"Negativ:  {neg} db  ({neg/total*100:.1f}%)\n"
                 f"Semleges: {sem} db  ({sem/total*100:.1f}%)\n"
+                f"Hiba:     {hib} db  ({hib/total*100:.1f}%)\n"
                 f"Atlag pontszam: {atl}\n\n"
                 f"Riport: {riport_fajl}"
             ) if total else f"Elemzes kesz!\n\nRiport: {riport_fajl}"

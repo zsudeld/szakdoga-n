@@ -38,6 +38,19 @@ _VEKONY_BORDER = Border(
     bottom=Side(style='thin'),
 )
 
+# Karakterek, amelyekkel kezdődő szöveget az Excel képletként értelmezne
+_KEPLET_JELZEK = ('=', '+', '-', '@')
+
+
+def _cella_szovegkent(cell):
+    """
+    Excel-képlet-injekció elleni védelem: a fenti jelekkel kezdődő szöveges
+    cellákat explicit szövegként (data_type='s') menti, így az eredeti
+    szöveg változatlanul, nem képletként tárolódik.
+    """
+    if isinstance(cell.value, str) and cell.value[:1] in _KEPLET_JELZEK:
+        cell.data_type = 's'
+
 
 def _fejlec_cella(cell, szoveg: str):
     """Kék fejléc cella formázás."""
@@ -66,6 +79,7 @@ def _adat_cella(cell, ertek, alternalo: bool = False):
         cell.value = ertek
     else:
         cell.value = str(ertek) if ertek != "" else ""
+    _cella_szovegkent(cell)
     cell.font      = Font(name='Arial', size=10)
     cell.alignment = Alignment(wrap_text=True, vertical='top')
     cell.border    = _VEKONY_BORDER
@@ -197,11 +211,12 @@ def _lap_statisztika(wb: Workbook, df: pd.DataFrame, stats: dict):
         cell.fill  = PatternFill(start_color=_VILAGOSKEK, fill_type='solid')
         cell.border = _VEKONY_BORDER
 
-    kategoriak = ['Pozitív (Hibrid)', 'Negatív (Hibrid)', 'Semleges (Hibrid)']
+    kategoriak = ['Pozitív (Hibrid)', 'Negatív (Hibrid)', 'Semleges (Hibrid)', 'Hiba (feldolgozás)']
     szin_map = {
         'Pozitív (Hibrid)':  _ZOLD_HATTER,
         'Negatív (Hibrid)':  _PIROS_HATTER,
         'Semleges (Hibrid)': _SARGA_HATTER,
+        'Hiba (feldolgozás)': _SZURKE,
     }
 
     total = sum(stats.get(k, 0) for k in kategoriak)
@@ -209,7 +224,7 @@ def _lap_statisztika(wb: Workbook, df: pd.DataFrame, stats: dict):
     row = 5
     for kat in kategoriak:
         count = stats.get(kat, 0)
-        label = kat.replace(' (Hibrid)', '')
+        label = kat.replace(' (Hibrid)', '').replace(' (feldolgozás)', ' – feldolgozási hiba')
 
         a_cell         = ws[f'A{row}']
         a_cell.value   = label
@@ -248,7 +263,7 @@ def _lap_statisztika(wb: Workbook, df: pd.DataFrame, stats: dict):
     ws[f'A{row + 3}'].font = Font(name='Arial', bold=True)
     ws[f'B{row + 3}'] = len(df)
 
-    # Pie chart
+    # Pie chart (csak a három sentiment-kategória szerepel)
     pie         = PieChart()
     pie.title   = "Sentiment Kategória Eloszlás"
     pie.style   = 10
@@ -278,14 +293,29 @@ def _lap_statisztika(wb: Workbook, df: pd.DataFrame, stats: dict):
 
 def _lap_temak(wb: Workbook, df: pd.DataFrame):
     ws = wb.create_sheet("Témaelemzés")
-    ws['A1'] = 'BERTOPIC TÉMAKÖR ELEMZÉS'
+
+    # Explicit forrásjelölés: csak akkor beszélünk BERTopic klaszterekről, ha
+    # tényleg futott a BERTopic. Ha az oszlop hiányzik (kevés szöveg vagy
+    # hiba), a lap per-dokumentum TF-IDF kulcsszavakat mutat – jelölve.
+    bertopic_futott = 'bertopic_tema' in df.columns
+
+    if bertopic_futott:
+        ws['A1'] = 'BERTOPIC TÉMAKÖR ELEMZÉS'
+        megjegyzes = (
+            'Megjegyzés: Ez a lap korpusz-szintű témacsoportokat mutat (BERTopic klaszterek). '
+            'Az "Elemzési Eredmények" lap "Téma" oszlopa per-dokumentum TF-IDF kulcsszavakat tartalmaz.'
+        )
+    else:
+        ws['A1'] = 'TÉMAELEMZÉS – TF-IDF KULCSSZAVAK (BERTopic NEM FUTOTT)'
+        megjegyzes = (
+            'Megjegyzés: A BERTopic nem volt futtatható (kevés szöveg vagy hiba történt). '
+            'Ez a lap per-dokumentum TF-IDF kulcsszavakat tartalmaz, NEM BERTopic klasztereket.'
+        )
+
     ws['A1'].font = Font(name='Arial', size=14, bold=True, color=_KEKFEJ)
     ws.merge_cells('A1:C1')
 
-    ws['A2'] = (
-        'Megjegyzés: Ez a lap korpusz-szintű témacsoportokat mutat (BERTopic klaszterek). '
-        'Az "Elemzési Eredmények" lap "Téma" oszlopa per-dokumentum TF-IDF kulcsszavakat tartalmaz.'
-    )
+    ws['A2'] = megjegyzes
     ws['A2'].font = Font(name='Arial', size=9, italic=True, color='666666')
     ws.merge_cells('A2:C2')
 
@@ -296,7 +326,8 @@ def _lap_temak(wb: Workbook, df: pd.DataFrame):
         cell.fill   = PatternFill(start_color=_VILAGOSKEK, fill_type='solid')
         cell.border = _VEKONY_BORDER
 
-    # Előnyben részesítjük a BERTopic klaszter-oszlopot, fallback: per-doc kulcsszavak
+    # Elsőbbséget élvez a BERTopic klaszter-oszlop; ha nem futott, per-doc
+    # kulcsszavak (a lap fejléce jelzi a forrást)
     tema_oszlop = 'bertopic_tema' if 'bertopic_tema' in df.columns else 'tema_kulcsszavak'
 
     if tema_oszlop in df.columns:
@@ -306,6 +337,7 @@ def _lap_temak(wb: Workbook, df: pd.DataFrame):
         for row, (tema, count) in enumerate(tema_counts.head(20).items(), 5):
             a_cell        = ws[f'A{row}']
             a_cell.value  = str(tema)[:60]
+            _cella_szovegkent(a_cell)
             a_cell.border = _VEKONY_BORDER
 
             b_cell        = ws[f'B{row}']
@@ -393,6 +425,7 @@ def _lap_entitasok(wb: Workbook, df: pd.DataFrame):
 
             a_cell        = ws[f'A{row}']
             a_cell.value  = name
+            _cella_szovegkent(a_cell)
             a_cell.border = _VEKONY_BORDER
 
             b_cell        = ws[f'B{row}']

@@ -31,7 +31,7 @@ echo [5/8] NLP csomagok telepitese...
 
 :: [6/8] HuSpaCy magyar modell letoltese
 echo [6/8] HuSpaCy hu_core_news_lg modell letoltese es telepitese...
-curl.exe -s -L -o hu_core_news_lg-3.8.1-py3-none-any.whl https://huggingface.co/huspacy/hu_core_news_lg/resolve/main/hu_core_news_lg-any-py3-none-any.whl
+curl.exe -s -L -o hu_core_news_lg-3.8.1-py3-none-any.whl https://huggingface.co/huspacy/hu_core_news_lg/resolve/main/hu_core_news_lg-3.8.1-py3-none-any.whl
 "%APP_DIR%\venv\Scripts\python.exe" -m pip install hu_core_news_lg-3.8.1-py3-none-any.whl
 del hu_core_news_lg-3.8.1-py3-none-any.whl
 

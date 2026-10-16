@@ -179,6 +179,19 @@ def ertekel(
     if len(eredmenyek) != len(szovegek):
         raise RuntimeError("Az elemző nem minden szövegre adott eredményt.")
 
+    # Az NYTK modell hiánya ne nézzen ki érvényes (semleges) HuBERT-becslésnek:
+    # ilyenkor a 'B) NYTK HuBERT' konfiguráció sorai 'hiba'-ként jelennek meg.
+    if hasattr(motor, "sentiment"):
+        nytk_erheto = motor.sentiment is not None
+        if not nytk_erheto:
+            print(
+                "FIGYELEM: Az NYTK (HuBERT) modell nem érhető el – degradált, "
+                "szótár-alapú módban fut az elemzés. A 'B) NYTK HuBERT' "
+                "konfiguráció eredményei 'hiba'-ként jelennek meg, nem semlegesként."
+            )
+    else:
+        nytk_erheto = None
+
     dev_idx, teszt_idx = felosztas(gold, teszt_arany, seed)
     reszminta = {"fejlesztői": dev_idx, "teszt": teszt_idx, "összes": list(range(len(gold)))}
 
@@ -222,6 +235,10 @@ def ertekel(
         "Kiértékelés ideje": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "Címkézett szövegek száma": len(gold),
         "Kihagyott sorok (hiányzó címke vagy szöveg)": kihagyott,
+        "NYTK modell elérhető": (
+            "n/a (nem FejlettSentimentElemzo motor)" if nytk_erheto is None
+            else ("igen" if nytk_erheto else "NEM – a B) konfiguráció 'hiba'-ként jelentkezik")
+        ),
         "Fejlesztői / teszt méret": f"{len(dev_idx)} / {len(teszt_idx)}",
         "Teszt arány": teszt_arany, "Seed": seed,
         "Elemzés futási ideje (mp)": round(ido, 2),
@@ -245,6 +262,12 @@ def mentes_excel(eredmeny: dict, utvonal: str) -> None:
         )
         for lap in iro.book.worksheets:
             for oszlop in lap.columns:
+                # Excel-képlet-injekció elleni védelem: a bemeneti szövegből
+                # származó, '=', '+', '-', '@' jellel kezdődő cellák legyenek
+                # szövegként tárolva, ne képletként.
+                for c in oszlop:
+                    if isinstance(c.value, str) and c.value[:1] in ('=', '+', '-', '@'):
+                        c.data_type = 's'
                 szeles = max((len(str(c.value)) for c in oszlop if c.value is not None), default=8)
                 lap.column_dimensions[oszlop[0].column_letter].width = min(max(10, szeles + 2), 60)
 

@@ -6,6 +6,8 @@ Segédfüggvények: CSV beolvasás, oszlopválasztás, függőség-ellenőrzés.
 
 from pathlib import Path
 
+import csv
+
 import pandas as pd
 import chardet
 
@@ -40,9 +42,48 @@ def _elvalaszto_becsles(fajlnev: str, kodolas: str | None) -> str | None:
     return legjobb if darab[legjobb] > 0 else None
 
 
+def _szerkezeti_ellenorzes(fajlnev: str, elvalaszto: str, kodolas: str | None) -> list:
+    """
+    A pandas előtti célzott szerkezeti ellenőrzés: csv.reader-rel (amely az
+    idézőjeles sortöréseket is szabályosan kezeli) megvizsgálja, hogy van-e
+    a fejlécnél több mezőt tartalmazó rekord.
+
+    Az ilyen rekordokat a pandas ugyanis vagy csendesen kihagyja, vagy az
+    első oszlopot indexoszlopként értelmezi (csendes adat-eltolódás) – ezért
+    itt, az elemzés előtt világos hibával kell leállni.
+
+    Visszatér: (hibas_rekordok, fejlec_mezoszam) tuple, ahol hibas_rekordok az
+    [(sorszam, rekord), ...] lista (sorszám: a fájl logikai rekordja 1-től
+    számozva, a fejléc az 1.), fejlec_mezoszam pedig a fejléc mezőinek
+    száma (None, ha nem volt olvasható fejléc).
+    """
+    hibas_rekordok = []
+    fejlec_mezoszam = None
+    try:
+        with open(fajlnev, 'r', encoding=kodolas or 'utf-8',
+                  errors='replace', newline='') as f:
+            olvaso = csv.reader(f, delimiter=elvalaszto)
+            for sorszam, rekord in enumerate(olvaso, 1):
+                if fejlec_mezoszam is None:
+                    if not rekord or all(not m.strip() for m in rekord):
+                        continue  # üres kezdősorok átugrása
+                    fejlec_mezoszam = len(rekord)
+                    continue
+                if len(rekord) > fejlec_mezoszam:
+                    hibas_rekordok.append((sorszam, rekord))
+    except (OSError, csv.Error):
+        return [], fejlec_mezoszam  # ha nem olvasható, a pandas út úgyis hibát ad
+    return hibas_rekordok, fejlec_mezoszam
+
+
 def intelligens_csv_beolvasas(fajlnev: str):
     """
     Hibatűrő CSV beolvasás automatikus encoding-detektálással.
+
+    A hibás (többletmezős) sorokat kihagyja, de a kihagyásukat a konzolon
+    jelzi. Ha a fejlécből ismert az elválasztó, szerkezeti hiba esetén nem
+    próbálkozik más elválasztóval (egyébként a hibás fájl egyetlen oszlopként,
+    félreértelmezve olvasódna be).
 
     Visszatér: pandas DataFrame, vagy None ha sikertelen.
     """
@@ -86,17 +127,60 @@ def intelligens_csv_beolvasas(fajlnev: str):
     if becsult_sep:
         beallitasok.sort(key=lambda p: p['sep'] != becsult_sep)  # stabil rendezés
 
+        # Szerkezeti előellenőrzés (pandas előtt): a fejlécnél több mezőt
+        # tartalmazó rekord csendes soreldobást vagy indexoszlop-értelmezést
+        # (adat-eltolódást) okozna – világos hibával állunk le.
+        hibas_rekordok, fejlec_mezoszam = _szerkezeti_ellenorzes(
+            fajlnev, becsult_sep, detected_encoding
+        )
+        if hibas_rekordok and fejlec_mezoszam:
+            sorszam, rekord = hibas_rekordok[0]
+            raise ValueError(
+                f"A CSV fájl szerkezete hibás: a(z) {sorszam}. rekord "
+                f"{len(rekord)} mezőt tartalmaz, de a fejléc csak "
+                f"{fejlec_mezoszam} mezőt. Összesen {len(hibas_rekordok)} ilyen "
+                f"rekord. Javítsd a fájlt (vagy told ki a hibás sorokat), mert a "
+                f"program a csúszott adatokat nem elemzi."
+            )
+
     utolso_hiba = None
+    szerkezeti_hiba_ismert_sep_el = False   # ParserError a becsült elválasztóval
 
     for idx, params in enumerate(beallitasok, 1):
+        # Ha a fejlécből becsült elválasztóval már szerkezeti hiba történt,
+        # más elválasztóval nem próbálkozunk (az csak egyoszlopos káoszt adna).
+        if becsult_sep and szerkezeti_hiba_ismert_sep_el and params['sep'] != becsult_sep:
+            break
+
+        # A hibás sorok kihagyása nem csendes: a python-motor hívható
+        # on_bad_lines kezelője megszámolja és visszaírja őket.
+        hibas_sorok: list = []
+
+        def _hibas_sor_kihagy(sor):
+            hibas_sorok.append(sor)
+            return None  # None -> a sor kihagyása
+
         try:
-            df = pd.read_csv(fajlnev, on_bad_lines='skip', low_memory=False, **params)
+            df = pd.read_csv(
+                fajlnev,
+                on_bad_lines=_hibas_sor_kihagy,
+                engine='python',
+                **params,
+            )
 
             if len(df) > 0 and len(df.columns) > 0:
                 df.columns = df.columns.str.strip()
                 df         = df.dropna(how='all')
 
                 if len(df) > 0:
+                    if hibas_sorok:
+                        print(
+                            f"   FIGYELEM: {len(hibas_sorok)} hibás (többletmezős) sor "
+                            f"kihagyva a beolvasás során!"
+                        )
+                        elso = str(hibas_sorok[0])[:60]
+                        print(f"      Példa: {elso}...")
+                        print("      A kihagyott sorok miatt a riport sorszámozása eltolódhat.")
                     print(f"Sikeres beolvasas: {len(df)} sor, {len(df.columns)} oszlop")
                     print(f"   Beallitas: {params}")
                     return df
@@ -107,7 +191,12 @@ def intelligens_csv_beolvasas(fajlnev: str):
             raise PermissionError(
                 "A fajl zarolt – zard be (pl. Excelben) es probald ujra."
             )
+        except pd.errors.EmptyDataError:
+            print("A fajl ures – nincs feldolgozhato adat.")
+            return None
         except (UnicodeDecodeError, pd.errors.ParserError) as e:
+            if isinstance(e, pd.errors.ParserError) and becsult_sep and params['sep'] == becsult_sep:
+                szerkezeti_hiba_ismert_sep_el = True
             utolso_hiba = e
             continue
         except Exception as e:
@@ -216,7 +305,7 @@ def ellenorizd_fuggosegeket(visszaad_listaban: bool = False):
                 raise OSError
         except OSError:
             print("\nHuSpaCy modell (hu_core_news_lg) nincs telepitve!")
-            print("Telepites: pip install huspacy && python -m spacy download hu_core_news_lg")
+            print("Telepites: pip install huspacy && python -c \"import huspacy; huspacy.download()\"")
             hianyzo.append("hu_core_news_lg (SpaCy modell)")
             modell_hiba = True
 

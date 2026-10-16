@@ -41,7 +41,7 @@ class TestHibridKategoria:
         assert kat == "pozitív"
 
     def test_gyenge_jelek_semleges(self):
-        """Mindkét jel tényleg gyenge → semleges. mc=0.49 < 0.50, abs(hp)=0.05 < 0.15"""
+        """Mindkét jel tényleg gyenge → semleges. mc=0.49 < 0.60, abs(hp)=0.05 < 0.22"""
         kat, _ = _hibrid_kategoria(0.05, "pozitív", 0.49)
         assert kat == "semleges"
 
@@ -66,13 +66,30 @@ from huspacy_elemzo import _feldolgoz_nytk_eredmeny
 class TestFeldolgozNytkEredmeny:
 
     def test_none_input(self):
+        """A hiányzó modellválasz hiba, nem kitalált semleges."""
         kat, conf = _feldolgoz_nytk_eredmeny(None)
-        assert kat == "semleges"
-        assert conf == 0.5
+        assert kat == "hiba"
+        assert conf == 0.0
 
     def test_ures_lista(self):
         kat, conf = _feldolgoz_nytk_eredmeny([])
-        assert kat == "semleges"
+        assert kat == "hiba"
+        assert conf == 0.0
+
+    def test_ures_valaszt_ado_pipeline(self):
+        """A None-t vagy üres listát visszaadó helyettesítő pipeline hibát ad."""
+        class _UresPipeline:
+            def __call__(self, szoveg):
+                return None
+        kat, conf = _modell_elemez("teszt", _UresPipeline())
+        assert (kat, conf) == ("hiba", 0.0)
+
+    def test_kivetelt_do_pipeline(self):
+        class _HibasPipeline:
+            def __call__(self, szoveg):
+                raise RuntimeError("modell hiba")
+        kat, conf = _modell_elemez("teszt", _HibasPipeline())
+        assert (kat, conf) == ("hiba", 0.0)
 
     def test_harom_osztalyos_pozitiv(self):
         raw = [
@@ -165,6 +182,8 @@ class MockToken:
         class _Head:
             def __init__(self, lemma):
                 self.lemma_ = lemma
+                self.text = lemma
+                self.dep_ = "ROOT"
         return _Head(self._head_lemma)
 
     @property
@@ -600,3 +619,252 @@ class TestErtekel:
         df, tabla = self._adat()
         with pytest.raises(KeyError):
             ertekel(df, "nincs_ilyen", "cimke", _HelyettesitoMotor(tabla))
+
+# ---------------------------------------------------------------------------
+# Regressziós tesztek a javításokra (hiba-állapot, képletvédelem,
+# soreldobás-jelzés, BERTopic-forrásjelölés)
+# ---------------------------------------------------------------------------
+
+from huspacy_elemzo import _hiba_eredmeny, _modell_elemez  # noqa: E402
+
+
+class TestHibaEredmeny:
+    """A feldolgozási hiba ne nézzen ki semleges (érvényes) becslésnek."""
+
+    def test_hiba_eredmeny_hiba_allapot(self):
+        e = _hiba_eredmeny("tesztszoveg", "feldolgozasi hiba")
+        assert e["hibrid_kategoria"] == "hiba"
+        assert e["hunbert_kategoria"] == "hiba"
+
+    def test_hiba_ervenytelen_becsles_a_metrikakban(self):
+        e = _hiba_eredmeny("tesztszoveg", "hiba")
+        m = metrikak(["semleges"], [e["hibrid_kategoria"]])
+        assert m["ervenytelen_becslesek"] == 1
+        assert m["pontossag"] == 0.0
+
+    def test_modell_hiba_nem_semleges(self):
+        kat, conf = _modell_elemez("szoveg", None)
+        assert kat == "hiba"
+        assert conf == 0.0
+
+
+class TestExcelFormulaVedelem:
+    """A '=' jellel kezdődő bemeneti szöveg ne kerüljön képletként az Excelbe."""
+
+    def _df(self):
+        return pd.DataFrame({
+            "eredeti_szoveg": ["=1+1", "=HYPERLINK(\"http://rosszold.hu\")", "rendben"],
+            "hibrid_kategoria": ["pozitív", "pozitív", "semleges"],
+        })
+
+    def test_riport_szovegkent_tarol(self, tmp_path):
+        from riport_generator import generalj_riportot
+        import openpyxl
+        ut = tmp_path / "formula_riport.xlsx"
+        generalj_riportot(self._df(), {
+            "Pozitív (Hibrid)": 2, "Negatív (Hibrid)": 0,
+            "Semleges (Hibrid)": 1, "Hiba (feldolgozás)": 0,
+            "Átlagos HuSpaCy pont": 0.0,
+        }, kimenet=str(ut))
+        wb = openpyxl.load_workbook(str(ut))
+        ws = wb["Elemzési Eredmények"]
+        c1, c2, c3 = ws["B2"], ws["B3"], ws["B4"]
+        assert c1.data_type == "s" and c1.value == "=1+1"
+        assert c2.data_type == "s" and c2.value.startswith("=HYPERLINK")
+        assert c3.data_type == "s" and c3.value == "rendben"
+
+    def test_kiertekeles_export_szovegkent_tarol(self, tmp_path):
+        from kiertekeles import mentes_excel
+        import openpyxl
+        er = {
+            "osszehasonlitas": pd.DataFrame({"Konfiguráció": ["teszt"], "Pontosság": [1.0]}),
+            "konfuzio": pd.DataFrame([[1, 0], [0, 1]]),
+            "hibak": pd.DataFrame([{"Szöveg": "=1+1", "Valós": "pozitív"}]),
+            "meta": {"Szöveg": "=2+2"},
+            "kappa": None,
+        }
+        ut = tmp_path / "kiertekeles.xlsx"
+        mentes_excel(er, str(ut))
+        wb = openpyxl.load_workbook(str(ut))
+        talalt = [
+            c for lap in wb.worksheets for sor in lap.iter_rows() for c in sor
+            if isinstance(c.value, str) and c.value.startswith("=")
+        ]
+        assert talalt, "az exportált képletszerű szövegnek szerepelnie kell"
+        for c in talalt:
+            assert c.data_type == "s"
+
+
+class TestHibasSorokJelzese:
+    """A többletmezős sorok kihagyása ne legyen csendes."""
+
+    def test_tobbletmezos_sor_szerkezeti_hiba(self, tmp_path):
+        """A fejlécnél több mezős rekord után a beolvasó világos hibával áll le –
+        a csendes kihagyás/index-értelmezés csúszott adatokat elemelne."""
+        ut = tmp_path / "hibas_sor.csv"
+        ut.write_text(
+            "nev;velemeny\nKati;jo\nPeti;rossz;FELESLEGES\nAnna;jo\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="szerkezete hibás.*3. rekord"):
+            intelligens_csv_beolvasas(str(ut))
+
+    def test_tobbletmezos_elso_adatsor_is_szerkezeti_hiba(self, tmp_path):
+        ut = tmp_path / "hibas_elso.csv"
+        ut.write_text(
+            "nev;velemeny\nPeti;rossz;FELESLEGES\nAnna;jo\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="szerkezete hibás"):
+            intelligens_csv_beolvasas(str(ut))
+
+    def test_ures_sorok_nem_szerkezeti_hiba(self, tmp_path):
+        """A szabályos üres rekordok nem hibásak – a beolvasás rendben lefut."""
+        ut = tmp_path / "ures_sorok.csv"
+        ut.write_text(
+            "nev;velemeny\nKati;jo\n\nAnna;jo\n",
+            encoding="utf-8",
+        )
+        df = intelligens_csv_beolvasas(str(ut))
+        assert df is not None
+        assert len(df) >= 2
+
+    def test_ideszett_sortores_nem_hibas_sor(self, tmp_path, capsys):
+        ut = tmp_path / "idezet.csv"
+        ut.write_text(
+            'nev;velemeny\nKati;"tobb\nsoros, gondolat"\nAnna;jo\n',
+            encoding="utf-8",
+        )
+        df = intelligens_csv_beolvasas(str(ut))
+        kimenet = capsys.readouterr().out
+        assert df is not None and len(df) == 2
+        assert "FIGYELEM" not in kimenet
+
+    def test_ures_fajl_tisztan_kezelve(self, tmp_path, capsys):
+        ut = tmp_path / "ures.csv"
+        ut.write_text("", encoding="utf-8")
+        df = intelligens_csv_beolvasas(str(ut))
+        kimenet = capsys.readouterr().out
+        assert df is None
+        assert "ures" in kimenet
+        assert "Hiba (" not in kimenet  # nem zajos tízkísérletes kimenet
+
+
+class TestBertopicForrasJeloles:
+    """A Témaelemzés lap csak akkor ígérjen BERTopicot, ha tényleg futott."""
+
+    def _lap(self, df):
+        from openpyxl import Workbook
+        from riport_generator import _lap_temak
+        wb = Workbook()
+        _lap_temak(wb, df)
+        return wb["Témaelemzés"]
+
+    def test_bertopic_futott(self):
+        df = pd.DataFrame({
+            "bertopic_tema": ["Téma 1", "Téma 1", "Téma 2"],
+            "tema_kulcsszavak": ["a", "b", "c"],
+        })
+        ws = self._lap(df)
+        assert "BERTOPIC" in ws["A1"].value
+
+    def test_bertopic_nem_futott(self):
+        df = pd.DataFrame({
+            "tema_kulcsszavak": ["a", "b", "c"],
+        })
+        ws = self._lap(df)
+        assert "TF-IDF" in ws["A1"].value
+        assert "BERTopic NEM FUTOTT" in ws["A1"].value
+        # a megjegyzés is jelezze
+        assert "NEM BERTopic" in ws["A2"].value
+
+
+class TestHibasNlpSorBatchben:
+    """A hibázó HuSpaCy-motor egy sorra: a sor 'hiba' állapotot kap, a többi
+    sor feldolgozása megmarad, és a hibás sor nem lesz érvényes semleges találat."""
+
+    def _motor(self, hibas_szoveg):
+        from huspacy_elemzo import FejlettSentimentElemzo
+        motor = FejlettSentimentElemzo.__new__(FejlettSentimentElemzo)
+        motor.nlp = _HibasNlp(hibas_szoveg)
+        motor.sentiment = None
+        return motor
+
+    def test_hibas_sor_hiba_allapot(self):
+        motor = self._motor("hibas szoveg")
+        szovegek = ["nagyon jó", "hibas szoveg", "rossz"]
+        eredmenyek = list(motor.elemzes_batch(szovegek))
+        assert len(eredmenyek) == 3
+        # a hibás sor hiba-állapotot kap, nem semlegest
+        assert eredmenyek[1]["hibrid_kategoria"] == "hiba"
+        assert eredmenyek[1]["kategoria"] == "hiba"
+        # a többi sor feldolgozása megmarad
+        assert eredmenyek[0]["hibrid_kategoria"] == "pozitív"
+        assert eredmenyek[2]["hibrid_kategoria"] == "negatív"
+        # a hibás sor a kiértékelésben érvénytelen becslés
+        m = metrikak(["pozitív"], [eredmenyek[1]["hibrid_kategoria"]])
+        assert m["ervenytelen_becslesek"] == 1
+        assert m["pontossag"] == 0.0
+
+
+class TestStatisztikaHibaSor:
+    """A feldolgozási hibák jelenjenek meg a Statisztikai Összefoglaló lapban."""
+
+    def test_hiba_kategoria_latszik(self):
+        from openpyxl import Workbook
+        from riport_generator import _lap_statisztika
+        df = pd.DataFrame({"hunbert_confidence": [0.5, 0.6, 0.4]})
+        stats = {
+            "Pozitív (Hibrid)": 1, "Negatív (Hibrid)": 1,
+            "Semleges (Hibrid)": 2, "Hiba (feldolgozás)": 1,
+            "Átlagos HuSpaCy pont": 0.1,
+        }
+        wb = Workbook()
+        _lap_statisztika(wb, df, stats)
+        ws = wb["Statisztikai Összefoglaló"]
+        # a 4 kategória sorai: 5..8
+        assert ws["A8"].value == "Hiba – feldolgozási hiba"
+        assert ws["B8"].value == 1
+        # a százalékok a négy kategória összegéből számolódnak
+        assert ws["C5"].value == pytest.approx(1 / 5 * 100)
+
+
+# ---------------------------------------------------------------------------
+# Mock NLP-motor a batch-integrációs teszthez (modellletöltés nélkül)
+# ---------------------------------------------------------------------------
+
+class _MockNlpToken(MockToken):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dep_ = "nsubj"
+
+
+class _MockNlpDoc(MockDoc):
+    @property
+    def sents(self):
+        return []
+
+    @property
+    def ents(self):
+        return []
+
+
+class _HibasNlp:
+    """A megadott szövegre hibázó, egyébként mock dokumentumot adó NLP-motor."""
+
+    def __init__(self, hibas_szoveg):
+        self.hibas = hibas_szoveg
+
+    def pipe(self, szovegek, batch_size=32):
+        for s in szovegek:
+            if s == self.hibas:
+                raise RuntimeError("mock HuSpaCy hiba")
+            yield self._doc(s)
+
+    def __call__(self, szoveg):
+        if szoveg == self.hibas:
+            raise RuntimeError("mock HuSpaCy hiba")
+        return self._doc(szoveg)
+
+    def _doc(self, szoveg):
+        return _MockNlpDoc([_MockNlpToken(w, pos="ADJ") for w in szoveg.split()])

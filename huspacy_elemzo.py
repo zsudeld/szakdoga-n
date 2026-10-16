@@ -280,15 +280,18 @@ def _feldolgoz_nytk_eredmeny(raw) -> tuple:
       - Explicit string labeleket (POSITIVE, NEGATIVE, NEUTRAL, stb.)
       - 3-osztályos numerikus mappinget: LABEL_0=neg, LABEL_1=neu, LABEL_2=pos
       - 5-osztályos numerikus mappinget: LABEL_0=very_neg, ..., LABEL_4=very_pos
+
+    A hiányzó (None) vagy üres modellválasz "hiba" állapot – a modell
+    meghibásodása nem álcázható semleges becslésnek.
     """
     if raw is None:
-        return "semleges", 0.5
+        return "hiba", 0.0
 
     if isinstance(raw, dict):
         raw = [raw]
 
     if not raw:
-        return "semleges", 0.5
+        return "hiba", 0.0
 
     scores_by_label = {r["label"].upper(): float(r["score"]) for r in raw}
 
@@ -353,14 +356,14 @@ def _feldolgoz_nytk_eredmeny(raw) -> tuple:
 def _modell_elemez(szoveg: str, pipeline_obj) -> tuple:
     """NYTK modell hívás egyetlen szövegre."""
     if pipeline_obj is None:
-        return "semleges", 0.5
+        return "hiba", 0.0
     try:
         raw = pipeline_obj(szoveg)
         if raw and isinstance(raw[0], list):
             raw = raw[0]
         return _feldolgoz_nytk_eredmeny(raw)
     except Exception:
-        return "semleges", 0.5
+        return "hiba", 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -484,13 +487,18 @@ def _hibrid_kategoria(
     """
     Kombinálja a szótári és transzformer eredményt.
 
-    Döntési sorrend:
+    Döntési sorrend (a tényleges küszöbkonstansokkal):
       1. Mindkét modell egyezik → egyértelműen az a kategória
-      2. NYTK magas konfidencia (≥ 0.55) → NYTK dönt
-      3. HuSpaCy erős szótári jel (|pont| ≥ 0.25) → HuSpaCy dönt
-      4. NYTK mérsékelt jel (> 0.50, nem semleges) → NYTK dönt
-      5. HuSpaCy gyenge jel (|pont| > 0.10) → HuSpaCy dönt
-      6. Valóban semleges
+      2. NYTK magas konfidencia (≥ 0.65, nem semleges) → NYTK dönt
+      3. HuSpaCy erős szótári jel (|pont| ≥ 0.35, nem semleges) → HuSpaCy dönt
+      4. NYTK mérsékelt jel (> 0.60, nem semleges) → NYTK dönt
+      5. HuSpaCy gyenge jel (|pont| > 0.22, nem semleges) → HuSpaCy dönt
+      6. Gyenge/ellentmondó jelek → semleges
+
+    Megjegyzés: a magas konfidenciájú SEMLEGES NYTK-döntés nem dönt
+    automatikusan – ilyenkor a szótári jel (illetve annak hiánya) az
+    irányadó. A "hiba" modellkategória sosem egyezik a szótári
+    kategóriával, így a hibás NYTK-hívás sosem néz ki egyezésnek.
     """
     if huspacy_pont > _HUSPACY_KAT_KUSZOOB:
         huspacy_kat = "pozitív"
@@ -625,7 +633,7 @@ def _hiba_eredmeny(szoveg: str, hiba: str) -> dict:
         "pontszam":                0.0,
         "hunbert_kategoria":       "hiba",
         "hunbert_confidence":      0.0,
-        "hibrid_kategoria":        "semleges",
+        "hibrid_kategoria":        "hiba",
         "hibrid_megalapozas":      f"Hiba: {hiba[:100]}",
         "mondatszintu_sentiment":  "",
         "pozitiv_elemek":          "",
@@ -684,6 +692,8 @@ class FejlettSentimentElemzo:
         tisztitott = [_tisztit(str(s)) for s in szovegek]
 
         # --- 1. HuSpaCy batch ---
+        # Ha egy sor feldolgozása hibázik, a docs helyén None jelzi ezt – a sor
+        # _hiba_eredmenyt kap, nem üres, sikeresnek tűnő dokumentumot.
         try:
             docs = list(self.nlp.pipe(tisztitott, batch_size=32))
         except Exception as e:
@@ -693,7 +703,7 @@ class FejlettSentimentElemzo:
                 try:
                     docs.append(self.nlp(t))
                 except Exception:
-                    docs.append(self.nlp(""))
+                    docs.append(None)  # a sor feldolgozása hibázott
 
         # --- 2. NYTK batch ---
         nytk_sor_cache: dict = {}
@@ -721,9 +731,13 @@ class FejlettSentimentElemzo:
 
         # --- 3. Eredmények összeállítása ---
         for doc_idx, (szoveg, tiszta, doc) in enumerate(zip(szovegek, tisztitott, docs)):
+            if doc is None:
+                # A HuSpaCy feldolgozás hibázott ennél a sornál
+                yield _hiba_eredmeny(szoveg, "HuSpaCy feldolgozási hiba")
+                continue
             try:
                 huspacy_pont = _szotari_pontszam(doc)
-                modell_kat, modell_conf = nytk_sor_cache.get(doc_idx, ("semleges", 0.5))
+                modell_kat, modell_conf = nytk_sor_cache.get(doc_idx, ("hiba", 0.0))
 
                 if huspacy_pont > _HUSPACY_KAT_KUSZOOB:
                     huspacy_kat = "pozitív"

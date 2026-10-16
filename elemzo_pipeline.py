@@ -87,16 +87,18 @@ def elemez(
     # 5b. BERTopic korpusz-szintű klaszterezés
     _cb(75, "BERTopic klaszterezés...")
     bertopic_tema_lista = generalj_bertopic(lemmatizalt)["tema_lista"]
+    # Sikertelen/kihagyott BERTopic esetén NEM másoljuk a TF-IDF kulcsszavakat
+    # BERTopic-eredményként: ilyenkor a bertopic_tema oszlop nem jön létre,
+    # és a riport a Témaelemzés lapot explicit TF-IDF forrásként jelöli.
     if bertopic_tema_lista and len(bertopic_tema_lista) == len(df_final):
         df_final["bertopic_tema"] = bertopic_tema_lista
-    else:
-        df_final["bertopic_tema"] = df_final["tema_kulcsszavak"]
 
     # 6. Statisztikák
     stats = {
         "Pozitív (Hibrid)":     int((df_final["hibrid_kategoria"] == "pozitív").sum()),
         "Negatív (Hibrid)":     int((df_final["hibrid_kategoria"] == "negatív").sum()),
         "Semleges (Hibrid)":    int((df_final["hibrid_kategoria"] == "semleges").sum()),
+        "Hiba (feldolgozás)":   int((df_final["hibrid_kategoria"] == "hiba").sum()),
         "Átlagos HuSpaCy pont": round(float(df_final["pontszam"].mean()), 2),
     }
 

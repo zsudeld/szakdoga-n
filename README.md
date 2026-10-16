@@ -23,7 +23,7 @@ A program hibrid architektúrát alkalmaz: szótári módszer, fine-tuned transz
 ## Fájlstruktúra
 
 ```
-sentiment_elemzo/
+szakdoga-n/
 ├── main.py               # CLI belépési pont
 ├── gui_app.py            # Tkinter grafikus felület
 ├── elemzo_pipeline.py    # Közös elemzési pipeline (CLI + GUI)
@@ -61,7 +61,7 @@ sentiment_elemzo/
 | `run_gui.bat` | Grafikus felület |
 | `run_cli.bat` | Parancssori mód |
 
-> **Ha nem a `C:\` meghajtóra szeretnéd telepíteni:** nyisd meg az `install.bat` fájlt szövegszerkesztővel, és módosítsd a `set APP_DIR=C:\nlp` sort a kívánt elérési útra. A launcher fájlok automatikusan az új útvonallal generálódnak.
+> **Ha nem a `C:\` meghajtóra szeretnéd telepíteni:** nyisd meg az `install.bat` fájlt szövegszerkesztővel, és módosítsd a `set APP_DIR=C:\nlp` sort a kívánt elérési útra. A `run_gui.bat` és `run_cli.bat` launcher fájlokban a `C:\nlp\venv\Scripts\python.exe` útvonalat is írd át kézzel az új helyre.
 
 ### Linux / macOS
 
@@ -138,7 +138,16 @@ Az elemzés két forrást kombinál soronként:
 1. **HuSpaCy szótári módszer** – morfológiai elemzésen alapuló pontszám (`–1.0 … +1.0`), scope-alapú negáció- és fokozókezeléssel.
 2. **NYTK HuBERT transzformer** – fine-tuned magyar sentiment modell konfidencia-értékkel.
 
-A végső kategóriát a két forrás prioritásos összevetése adja: ha az eredmények egyeznek, az a döntés; ha nem, a magasabb konfidenciájú forrás érvényesül.
+A végső kategóriát a két forrás prioritásos összevetése adja:
+
+1. **Egyezés** – ha a szótári és a modellkategória azonos, az a döntés.
+2. **NYTK magas konfidencia** – ha a HuBERT nem semleges kategóriát legalább 0,65 konfidenciával jelez, a modell dönt.
+3. **Erős szótári jel** – ha a szótári pontszám |értéke| legalább 0,35 (és nem semleges), a szótár dönt.
+4. **NYTK mérsékelt jel** – ha a HuBERT nem semleges kategóriát 0,60 feletti konfidenciával jelez, a modell dönt.
+5. **Gyenge szótári jel** – ha a szótári pontszám |értéke| 0,22 felett van (és nem semleges), a szótár dönt.
+6. **Gyenge/ellentmondó jelek** – egyébként semleges.
+
+Fontos: a magas konfidenciájú **semleges** modell-döntés önmagában nem dönt – ilyenkor a szótári jel az irányadó. A feldolgozás közben hibát okozó sorok külön `hiba` kategóriát kapnak (nem semlegest), így a kiértékelésben érvénytelen becslésként jelennek meg.
 
 ---
 
@@ -194,3 +203,17 @@ python kiertekeles.py -f cimkezett.csv -c szoveg -g gold --gold2 gold_masodik -o
 ```
 
 A küszöbértékek hangolását a fejlesztői részen kell végezni, a végső számokat a teszt részről kell jelenteni.
+
+### v1.2
+- Javítva: `install.sh` – a `python -m spacy download hu_core_news_lg` parancs a spaCy kompatibilitási táblájából kikerült magyar modell miatt hibázott; most a `huspacy` csomag hivatalos letöltőjét használja
+- Javítva: `install.bat` – a verziótalan ("any") modell-wheel helyett fix verziójú (`hu_core_news_lg-3.8.1`) URL-ről tölt, reprodukálhatóság céljából
+- Javítva: a feldolgozás közben hibát okozó sorok `hiba` kategóriát kapnak a korábbi `semleges` helyett – így nem torzítják a kiértékelési metrikákat (a konfúziós mátrix és a metrikák külön kezelik)
+- Javítva: az NYTK modell hiányában (vagy üres/hibás modellválasz esetén) a HuBERT-kategória `hiba`, nem kitalált `semleges`; a kiértékelés metaadata jelzi a modell elérhetőségét
+- Javítva: ha a HuSpaCy egy sor feldolgozása hibázik, a sor `hiba` állapotot kap (korábban üres dokumentumként `semleges` lett)
+- Biztonság: Excel-képlet-injekció elleni védelem – a `=`, `+`, `-`, `@` jellel kezdődő bemeneti szövegek szövegként tárolódnak a riportokban, nem képletként (mind a fő riport, mind a kiértékelés exportja)
+- Javítva: a fejlécnél több mezőt tartalmazó CSV-rekordoknál a beolvasó már az elemzés előtt, világos szerkezeti hibával leáll (csv.reader-alapú előellenőrzés) – korábban a pandas ezeket a sorokat csendesen kihagyta vagy az első oszlopot indexoszlopként értelmezte (csúszott adat)
+- Javítva: ha a fejlécből ismert az elválasztó, szerkezeti hiba esetén a beolvasó nem próbál más elválasztóval "sikeres" egyoszlopos beolvasást végezni
+- Javítva: a Témaelemzés lap csak akkor jelzi BERTopic-eredménynek a témákat, ha a BERTopic tényleg futott; egyébként explicit TF-IDF forrásként jelöli
+- Javítva: üres CSV fájl esetén tiszta hibaüzenet (korábban tíz sikertelen kísérlet zajos kimenete)
+- Dokumentáció: a hibrid döntési küszöbök leírása a tényleges konstansokhoz igazítva; a launcher-fájlok kézi átírására vonatkozó pontosítás
+- Tesztek: 62 → 78 (regressziós tesztek a fenti javításokra); a tesztfájl a `tests/` mappába került, gyökér-conftest-tal

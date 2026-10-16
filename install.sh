@@ -23,10 +23,13 @@ echo "[2/5] Python csomagok telepitese..."
 pip install -r "$SCRIPT_DIR/requirements.txt"
 
 # 3. HuSpaCy modell
+# Megjegyzés: a 'python -m spacy download hu_core_news_lg' parancs a spaCy
+# hivatalos kompatibilitási táblájában ma már nem találja a magyar modellt;
+# a huspacy csomag saját letöltőjét használjuk (a hivatalos javaslat).
 echo
 echo "[3/5] HuSpaCy hu_core_news_lg modell letoltese..."
 pip install huspacy
-python -m spacy download hu_core_news_lg
+python -c "import huspacy; huspacy.download()"
 
 # 4. NYTK Sentiment modell
 echo

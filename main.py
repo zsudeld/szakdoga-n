@@ -87,11 +87,14 @@ def inditas():
     poz = stats["Pozitív (Hibrid)"]
     neg = stats["Negatív (Hibrid)"]
     sem = stats["Semleges (Hibrid)"]
+    hib = stats.get("Hiba (feldolgozás)", 0)
     atl = stats["Átlagos HuSpaCy pont"]
-    total = poz + neg + sem
-    print(f"\n  Pozitiv:  {poz:>5} db  ({poz/total*100:.1f}%)" if total else "")
-    print(f"  Negativ:  {neg:>5} db  ({neg/total*100:.1f}%)" if total else "")
-    print(f"  Semleges: {sem:>5} db  ({sem/total*100:.1f}%)" if total else "")
+    total = poz + neg + sem + hib
+    if total:
+        print(f"\n  Pozitiv:  {poz:>5} db  ({poz/total*100:.1f}%)")
+        print(f"  Negativ:  {neg:>5} db  ({neg/total*100:.1f}%)")
+        print(f"  Semleges: {sem:>5} db  ({sem/total*100:.1f}%)")
+        print(f"  Hiba:     {hib:>5} db  ({hib/total*100:.1f}%)")
     print(f"  Atlag pontszam: {atl}")
     print(f"\nRiport: {riport_fajl}\n")
 
